@@ -27,14 +27,45 @@ body {
 .topbar {
     display: flex;
     align-items: center;
+    gap: 8px;
     padding: 0 16px;
     height: 48px;
     border-bottom: 1px solid var(--line);
     background: var(--bg-soft);
     flex: none;
+    /* The bar holds the workbook name, which can be long — keep it on one line and let the name
+       itself do the truncating (below) rather than wrapping or pushing the button off-screen. */
+    overflow: hidden;
 }
 
-.brand { font-weight: 600; color: var(--ink); text-decoration: none; }
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    color: var(--ink);
+    text-decoration: none;
+    white-space: nowrap;
+    flex: none;
+}
+
+.app-icon { display: block; flex: none; }
+
+/* The workbook name. min-width:0 is what actually lets a flex child shrink below its content size,
+   which is what makes the ellipsis work at all. */
+.topbar-file {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink);
+    font-weight: 600;
+}
+
+.topbar-file .sep { color: var(--muted); font-weight: 400; margin-right: 6px; }
+
+/* Pushes the actions to the right edge; it is the only element allowed to grow. */
+.topbar-spacer { flex: 1 1 auto; min-width: 8px; }
 
 main { padding: 16px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 
@@ -42,17 +73,9 @@ h1 { font-size: 18px; margin: 0 0 4px; }
 
 .meta { color: var(--muted); font-size: 13px; }
 
-.sheet-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    margin-bottom: 12px;
-    flex: none;
-}
-
 .btn {
     display: inline-block;
+    flex: none;
     padding: 6px 12px;
     border: 1px solid var(--line);
     border-radius: 6px;

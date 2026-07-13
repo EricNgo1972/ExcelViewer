@@ -10,7 +10,7 @@
    native scrolling, Ctrl+F, zoom and print for free. [StreamRendering] still gives us the loading
    state: this shell flushes immediately and the table streams into it. *@
 
-<PageTitle>@(_workbook?.FileName ?? "Workbook")</PageTitle>
+<PageTitle>@(_workbook is null ? "Maple XL Viewer" : $"Maple XL Viewer : {_workbook.FileName}")</PageTitle>
 
 @if (_loading)
 {
@@ -30,13 +30,16 @@ else
         <style>@((MarkupString)_workbook.Css)</style>
     </HeadContent>
 
-    <div class="sheet-header">
-        <div>
-            <h1>@_workbook.FileName</h1>
-            <span class="meta">@_workbook.Sheets.Count sheet@(_workbook.Sheets.Count == 1 ? "" : "s")</span>
-        </div>
+    @* Both of these render up in the layout's title bar. *@
+    <SectionContent SectionName="topbar-title">
+        <span class="topbar-file" title="@_workbook.FileName">
+            <span class="sep">:</span>@_workbook.FileName
+        </span>
+    </SectionContent>
+
+    <SectionContent SectionName="topbar-actions">
         <a class="btn" href="/api/workbooks/@Hash/original" download>Download original</a>
-    </div>
+    </SectionContent>
 
     @if (_workbook.Warnings.Count > 0)
     {

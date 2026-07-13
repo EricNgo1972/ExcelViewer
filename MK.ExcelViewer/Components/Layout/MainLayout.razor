@@ -1,8 +1,18 @@
 @inherits LayoutComponentBase
 
+@* The title bar is owned by the layout, but the filename and the Download button belong to the
+   workbook — so the page pushes them up here through named sections rather than each page
+   re-declaring its own bar. *@
+
 <div class="page">
     <header class="topbar">
-        <a class="brand" href="/">Excel Viewer</a>
+        <a class="brand" href="/">
+            <MK.ExcelViewer.Components.AppIcon />
+            <span>Maple XL Viewer</span>
+        </a>
+        <SectionOutlet SectionName="topbar-title" />
+        <div class="topbar-spacer"></div>
+        <SectionOutlet SectionName="topbar-actions" />
     </header>
     <main>
         @Body

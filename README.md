@@ -237,8 +237,39 @@ It is not pixel-identical to Excel — HTML's text engine isn't DirectWrite, so 
 a line one word differently — but every cell's text, font, colour, border, merge, alignment and size
 is correct.
 
-Sheets are capped at 5,000 rows / 100,000 cells. Past that the page shows *"showing the first N of M
-rows"* and offers the original for download.
+## Large reports
+
+Every cell becomes a real `<td>` — there is no virtualization — so **the browser is the binding
+constraint, not the server.** Measured end-to-end on a 20-column sheet (page load to painted):
+
+| cells | HTML | gzipped | browser | server RSS |
+|---|---|---|---|---|
+| 100k | 3.2 MB | 390 KB | 8 s | ~200 MB |
+| 200k | 6.4 MB | 783 KB | **12 s** | ~300 MB |
+| 300k | 9.6 MB | 1.2 MB | 20 s | ~400 MB |
+| 400k | 13 MB | 1.6 MB | 38 s | ~400 MB |
+
+It goes superlinear past ~200k — four times the cells costs nearly five times the time — so
+`MaxCellsPerSheet` defaults to **200,000** (50,000 rows / 1,024 columns as guard rails on any one
+dimension). Raise it if your users will genuinely wait; past ~300k they won't. Beyond the cap the
+page renders what it can and says *"showing the first N of M rows"*, with the original one click away.
+
+Responses are gzip/brotli compressed, which is worth roughly **7×** here — the HTML is a few hundred
+style classes repeated across hundreds of thousands of near-identical tags, so it is about as
+compressible as text gets.
+
+**The caps do not bound parse memory.** ClosedXML loads the entire workbook before we truncate
+anything, so a sheet we only ever show 200,000 cells of is still parsed in full. What bounds that is
+`MaxUncompressedBytes` (default 128 MB), checked against the *uncompressed* size of the archive
+before the parser is handed anything — which doubles as the zip-bomb guard, since a 30 KB file can
+declare gigabytes of XML. Peak working set runs roughly 5–6× that figure, so **budget ~1 GB of
+container memory** if you allow the full 128 MB.
+
+The app runs **Workstation GC** deliberately (`ServerGarbageCollection=false`). Server GC keeps a
+heap per core and only collects under pressure, which for this workload meant the process climbed to
+~1.7 GB after a few large reports and never gave it back. This is a low-throughput viewer, not a
+high-concurrency API — collecting promptly matters more than keeping per-core heaps warm. Measured:
+1.7 GB → 750 MB on the same workload.
 
 ---
 
@@ -287,11 +318,14 @@ One `ExcelViewer` section; secrets come from the environment with double undersc
 | `ApiKey` | `""` | **Empty = publishing is open** (the intended posture). |
 | `PublicBaseUrl` | `""` | Origin used to build `viewUrl`. Optional behind cloudflared. |
 | `StorageRoot` | *derived* | `.state/workbooks` in dev; `/var/lib/mk-excelviewer/workbooks` in prod (symlinked to `/data`). |
-| `MaxUploadBytes` | 32 MB | |
+| `MaxUploadBytes` | 32 MB | Size of the .xlsx on the wire. Under Cloudflare's 100 MB edge cap. |
+| `MaxUncompressedBytes` | 128 MB | Size once expanded. **This is what bounds parse memory**, and the zip-bomb guard. |
+| `MaxCellsPerSheet` | 200,000 | The binding cap — see [Large reports](#large-reports). |
+| `MaxRowsPerSheet` / `MaxColumnsPerSheet` | 50,000 / 1,024 | Guard rails on any one dimension. |
 | `RetentionDays` | 7 | Sliding, from last access. |
 | `MaxTotalBytes` | 2 GiB | LRU ceiling — the guard that saves the disk if a caller ever loops. |
 | `ParseTimeoutSeconds` | 60 | |
-| `RenderCacheMinutes` / `RenderCacheEntries` | 20 / 8 | Rendered workbooks cached by hash, so switching sheet tabs never re-parses. |
+| `RenderCacheMinutes` / `RenderCacheBudgetMb` | 20 / 256 | Rendered workbooks cached by hash, so switching sheet tabs never re-parses. A **byte** budget, not an entry count — one big report must evict several small ones rather than sit alongside them. |
 | `PerIpPerMinute` | 60 | Rate limit on publishing. 0 disables. |
 
 ---

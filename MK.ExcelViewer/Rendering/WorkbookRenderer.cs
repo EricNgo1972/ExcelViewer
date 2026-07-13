@@ -11,6 +11,14 @@ public sealed record RenderedWorkbook
     public required string Css { get; init; }
     public required string ScopeId { get; init; }
     public required IReadOnlyList<string> Warnings { get; init; }
+
+    /// <summary>
+    /// Roughly how much memory this render occupies (2 bytes per char). The cache charges against
+    /// this rather than counting entries, because entry count says nothing about the thing that
+    /// actually runs out.
+    /// </summary>
+    public long ApproximateBytes =>
+        2L * (Css.Length + Sheets.Sum(s => (long)s.Html.Length));
 }
 
 public sealed record RenderedSheet

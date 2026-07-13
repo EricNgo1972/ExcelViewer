@@ -5,14 +5,17 @@ using MK.ExcelViewer.Rendering.Model;
 
 namespace MK.ExcelViewer.Rendering;
 
-/// <summary>Caps that bound both memory and the emitted HTML. See RenderOptions in the README for the reasoning.</summary>
+/// <summary>
+/// Caps that bound the emitted HTML — and therefore the browser's DOM, which is what actually gives
+/// out first, since every cell becomes a real &lt;td&gt;. Also the backstop against a decompression
+/// bomb: a 40 KB zip can declare a ten-million-cell sheet.
+/// Defaults here mirror ExcelViewerOptions; the running app always passes its configured values.
+/// </summary>
 public sealed record ReadOptions
 {
-    public int MaxRowsPerSheet { get; init; } = 5_000;
-    public int MaxColumnsPerSheet { get; init; } = 256;
-
-    /// <summary>A 40 KB zip can inflate into a ten-million-cell sheet. This is the backstop.</summary>
-    public int MaxCellsPerSheet { get; init; } = 100_000;
+    public int MaxRowsPerSheet { get; init; } = 50_000;
+    public int MaxColumnsPerSheet { get; init; } = 1_024;
+    public int MaxCellsPerSheet { get; init; } = 200_000;
 
     public bool IncludeHiddenSheets { get; init; }
 }

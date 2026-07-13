@@ -319,6 +319,64 @@ public class RenderingTests
     }
 
     [Fact]
+    public void UncompressedSize_SeesPastTheZipCompression()
+    {
+        // The upload limit measures the ZIP. Parse memory tracks the XML inside it, which for a
+        // workbook is ~9x larger — so this is the number that actually bounds memory, and the only
+        // thing standing between us and a decompression bomb.
+        var bytes = Build(ws =>
+        {
+            for (var r = 1; r <= 200; r++)
+                for (var c = 1; c <= 20; c++)
+                    ws.Cell(r, c).Value = $"cell-{r}-{c}";
+        });
+
+        var uncompressed = FileSignature.UncompressedSize(bytes);
+
+        Assert.True(uncompressed > bytes.Length,
+            $"uncompressed ({uncompressed}) should exceed the zip ({bytes.Length})");
+    }
+
+    [Fact]
+    public void UncompressedSize_OnGarbage_IsZero_NotAThrow() =>
+        Assert.Equal(0, FileSignature.UncompressedSize([0x50, 0x4B, 0x03, 0x04, 0xFF, 0xFF]));
+
+    [Fact]
+    public void CellCap_TruncatesTheSheet_AndSaysSo()
+    {
+        // Past the cap the sheet must be cut off AND report it, so the page can say "showing the
+        // first N of M rows" rather than silently presenting a partial report as if it were whole.
+        var bytes = Build(ws =>
+        {
+            for (var r = 1; r <= 500; r++)
+                for (var c = 1; c <= 10; c++)
+                    ws.Cell(r, c).Value = r * c;
+        });
+
+        var rendered = Renderer.Render(bytes, "big.xlsx",
+            new ReadOptions { MaxCellsPerSheet = 1_000, MaxRowsPerSheet = 50_000 });
+
+        var sheet = rendered.Sheets[0];
+        Assert.True(sheet.RowsTruncated);
+        Assert.Equal(500, sheet.TotalRowCount);      // the honest total
+        Assert.True(sheet.ShownRowCount < 500);      // but we only rendered part of it
+    }
+
+    [Fact]
+    public void UnderTheCap_NothingIsTruncated()
+    {
+        var bytes = Build(ws =>
+        {
+            for (var r = 1; r <= 50; r++) ws.Cell(r, 1).Value = r;
+        });
+
+        var sheet = Renderer.Render(bytes, "small.xlsx").Sheets[0];
+
+        Assert.False(sheet.RowsTruncated);
+        Assert.Equal(50, sheet.ShownRowCount);
+    }
+
+    [Fact]
     public void CorruptWorkbook_ThrowsWorkbookReadException_NotSomethingRandom()
     {
         byte[] garbage = [0x50, 0x4B, 0x03, 0x04, 0x00, 0x00, 0x00, 0x00];

@@ -3,6 +3,8 @@ using MK.ExcelViewer.Options;
 using MK.ExcelViewer.Rendering;
 using MK.ExcelViewer.Storage;
 
+// ReadOptions() lives beside RenderCache — the caps belong to one place, not two.
+
 namespace MK.ExcelViewer.Ingest;
 
 public enum IngestStatus { Created, AlreadyExisted, TooLarge, Unsupported, Unreadable }
@@ -43,6 +45,21 @@ public sealed class WorkbookIngestService(
         if (signature.Verdict != SignatureVerdict.Xlsx)
             return new IngestResult(IngestStatus.Unsupported, Error: signature.Rejection);
 
+        // Check the UNCOMPRESSED size before handing anything to the parser. The upload limit says
+        // nothing about this — a small archive can declare a workbook far too large to hold in
+        // memory, and ClosedXML would load all of it before our render caps ever got a say.
+        var uncompressed = FileSignature.UncompressedSize(bytes);
+        if (uncompressed > _options.MaxUncompressedBytes)
+        {
+            log.LogWarning("Rejected {FileName}: {Mb} MB uncompressed, over the {Limit} MB limit.",
+                fileName, uncompressed / (1024 * 1024), _options.MaxUncompressedBytes / (1024 * 1024));
+
+            return new IngestResult(IngestStatus.TooLarge,
+                Error: $"This workbook is too large to display — it expands to "
+                     + $"{uncompressed / (1024 * 1024)} MB, over the "
+                     + $"{_options.MaxUncompressedBytes / (1024 * 1024)} MB limit.");
+        }
+
         var hash = WorkbookStore.ComputeHash(bytes);
 
         if (store.Exists(hash))
@@ -64,7 +81,7 @@ public sealed class WorkbookIngestService(
             timeout.CancelAfter(TimeSpan.FromSeconds(_options.ParseTimeoutSeconds));
 
             var token = timeout.Token;
-            rendered = await Task.Run(() => renderer.Render(bytes, fileName, ct: token), token);
+            rendered = await Task.Run(() => renderer.Render(bytes, fileName, _options.ReadOptions(), token), token);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

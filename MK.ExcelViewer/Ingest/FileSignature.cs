@@ -58,6 +58,30 @@ public static class FileSignature
         return SignatureResult.No("Not a workbook — the file is an old Office document, but not a spreadsheet.");
     }
 
+    /// <summary>
+    /// Total UNCOMPRESSED size of the .xlsx parts.
+    ///
+    /// This is the honest bound on how much memory a parse will cost, and it is not something the
+    /// render caps can protect: ClosedXML loads the whole workbook into memory before we truncate
+    /// anything, so a sheet we would only ever show the first 400,000 cells of is still parsed in
+    /// full. Measured, peak working set runs roughly 5–6x this number.
+    ///
+    /// It is also the zip-bomb guard. A 30 KB archive can legitimately declare gigabytes of XML,
+    /// and the upload size limit says nothing about that.
+    /// </summary>
+    public static long UncompressedSize(byte[] bytes)
+    {
+        try
+        {
+            using var zip = new ZipArchive(new MemoryStream(bytes, writable: false), ZipArchiveMode.Read);
+            return zip.Entries.Sum(e => e.Length);   // declared size, read from the central directory — nothing is inflated
+        }
+        catch (InvalidDataException)
+        {
+            return 0;   // not a readable zip; Detect() will reject it with a proper message
+        }
+    }
+
     private static SignatureResult DetectZip(byte[] bytes)
     {
         try

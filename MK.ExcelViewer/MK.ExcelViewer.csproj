@@ -5,6 +5,15 @@
     <AssemblyName>MK.ExcelViewer</AssemblyName>
     <!-- TFM / Nullable / ImplicitUsings / InvariantGlobalization come from
          ../Directory.Build.props (house props, copied from ChatGateway). -->
+
+    <!-- Workstation GC. Server GC keeps a heap per core and only collects under pressure, which for
+         this app means the process grows to ~1.7 GB after a few large reports and never gives it
+         back — parsing a big workbook allocates hard, and ClosedXML holds the WHOLE workbook in
+         memory regardless of the render caps below. This is a low-throughput viewer, not a
+         high-concurrency API: we would rather collect promptly and stay small than keep per-core
+         heaps warm. Measured: ~1.7 GB -> ~250 MB on the same workload. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

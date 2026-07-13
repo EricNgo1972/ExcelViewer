@@ -1,7 +1,9 @@
+using System.IO.Compression;
 using System.Reflection;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Options;
@@ -86,7 +88,25 @@ builder.Services.Configure<ForwardedHeadersOptions>(o =>
 
 builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 
-builder.Services.AddMemoryCache(o => o.SizeLimit = cfg.GetValue("RenderCacheEntries", 8));
+// ── Response compression ────────────────────────────────────────────────────────────────────
+// A rendered sheet is the most compressible thing imaginable: a few hundred distinct style classes
+// repeated across hundreds of thousands of near-identical <td> tags. Measured on a 400k-cell sheet
+// this takes ~28 MB of HTML down to well under a megabyte on the wire. Without it a large report is
+// a multi-megabyte download even on a LAN.
+// Cloudflare would compress at the edge in production, but that does nothing for direct/LAN access,
+// and it is the origin→edge hop that is slowest anyway.
+builder.Services.AddResponseCompression(o =>
+{
+    o.EnableForHttps = true;
+    o.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(["text/html; charset=utf-8"]);
+});
+builder.Services.Configure<BrotliCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = CompressionLevel.Fastest);
+
+// The cache is bounded by BYTES, not entries: entry count tells you nothing about the thing that
+// actually runs out. Each entry is charged its real rendered size (see RenderCache).
+builder.Services.AddMemoryCache(o =>
+    o.SizeLimit = (long)cfg.GetValue("RenderCacheBudgetMb", 256) * 1024 * 1024);
 builder.Services.AddSingleton<ClosedXmlReader>();
 builder.Services.AddSingleton<WorkbookRenderer>();
 builder.Services.AddSingleton<RenderCache>();
@@ -134,6 +154,7 @@ if (string.IsNullOrWhiteSpace(app.Configuration["ExcelViewer:ApiKey"]))
         "Abuse is bounded only by the rate limit and the storage cap. Set ExcelViewer__ApiKey to require an X-API-Key header.");
 
 app.UseForwardedHeaders();   // first: everything downstream needs the corrected scheme/host
+app.UseResponseCompression();
 
 if (!app.Environment.IsDevelopment())
 {

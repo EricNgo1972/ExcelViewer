@@ -1,0 +1,104 @@
+@page "/view/{Hash}"
+@attribute [StreamRendering(true)]
+@inject RenderCache Cache
+@inject MK.ExcelViewer.Storage.WorkbookStore Store
+
+@* No @rendermode. This page is deliberately STATIC SSR.
+   The grid can be megabytes of HTML; pushing that through a Blazor Server SignalR circuit means the
+   render tree is held in server memory for the life of the connection, re-pushed on every reconnect,
+   and diffed on every change. As plain SSR it is one gzipped HTTP response, and the browser gets
+   native scrolling, Ctrl+F, zoom and print for free. [StreamRendering] still gives us the loading
+   state: this shell flushes immediately and the table streams into it. *@
+
+<PageTitle>@(_workbook?.FileName ?? "Workbook")</PageTitle>
+
+@if (_loading)
+{
+    <div class="status"><span class="spinner"></span> Opening workbook…</div>
+}
+else if (_workbook is null)
+{
+    <div class="card notfound">
+        <h1>This workbook is no longer available</h1>
+        <p>Links expire after a period of inactivity. Ask the app that generated it to publish it again, or upload the file yourself.</p>
+        <a class="btn" href="/">Upload a workbook</a>
+    </div>
+}
+else
+{
+    <HeadContent>
+        <style>@((MarkupString)_workbook.Css)</style>
+    </HeadContent>
+
+    <div class="sheet-header">
+        <div>
+            <h1>@_workbook.FileName</h1>
+            <span class="meta">@_workbook.Sheets.Count sheet@(_workbook.Sheets.Count == 1 ? "" : "s")</span>
+        </div>
+        <a class="btn" href="/api/workbooks/@Hash/original" download>Download original</a>
+    </div>
+
+    @if (_workbook.Warnings.Count > 0)
+    {
+        <div class="warn">
+            @foreach (var warning in _workbook.Warnings)
+            {
+                <div>@warning</div>
+            }
+        </div>
+    }
+
+    @if (_workbook.Sheets.Count > 1)
+    {
+        @* Tabs are plain links, not event handlers — the whole point of static SSR. *@
+        <nav class="tabs">
+            @for (var i = 0; i < _workbook.Sheets.Count; i++)
+            {
+                var sheet = _workbook.Sheets[i];
+                var active = i == SheetIndex;
+                <a class="tab @(active ? "active" : "")"
+                   style="@(sheet.TabColorHex is not null ? $"border-bottom-color:{sheet.TabColorHex}" : "")"
+                   href="/view/@Hash?sheet=@i">@sheet.Name</a>
+            }
+        </nav>
+    }
+
+    @if (_sheet is not null)
+    {
+        @if (_sheet.RowsTruncated)
+        {
+            <div class="warn">
+                Showing the first @_sheet.ShownRowCount.ToString("N0") of @_sheet.TotalRowCount.ToString("N0") rows.
+                <a href="/api/workbooks/@Hash/original" download>Download the original</a> to see all of it.
+            </div>
+        }
+
+        <div class="viewport" id="@_workbook.ScopeId">
+            @((MarkupString)_sheet.Html)
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public string Hash { get; set; } = "";
+
+    [SupplyParameterFromQuery(Name = "sheet")]
+    public int SheetIndex { get; set; }
+
+    private RenderedWorkbook? _workbook;
+    private RenderedSheet? _sheet;
+    private bool _loading = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _workbook = await Cache.GetOrLoadAsync(Hash, CancellationToken.None);
+
+        if (_workbook is not null)
+        {
+            Store.Touch(Hash);   // sliding TTL: a workbook someone still opens stays alive
+            _sheet = _workbook.Sheets.ElementAtOrDefault(SheetIndex) ?? _workbook.Sheets.FirstOrDefault();
+        }
+
+        _loading = false;
+    }
+}

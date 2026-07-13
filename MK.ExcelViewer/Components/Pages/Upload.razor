@@ -1,0 +1,72 @@
+@page "/"
+@rendermode InteractiveServer
+@inject MK.ExcelViewer.Ingest.WorkbookIngestService Ingest
+@inject Microsoft.Extensions.Options.IOptions<MK.ExcelViewer.Options.ExcelViewerOptions> Options
+@inject NavigationManager Nav
+
+<PageTitle>Excel Viewer</PageTitle>
+
+<div class="card">
+    <h1>Open a workbook</h1>
+    <p class="meta">Choose an .xlsx file to view it in the browser.</p>
+
+    <label class="drop @(_busy ? "busy" : "")">
+        <InputFile OnChange="OnFileSelected" accept=".xlsx" disabled="@_busy" />
+        <span>@(_busy ? "Reading…" : "Choose a file")</span>
+    </label>
+
+    @if (_error is not null)
+    {
+        <div class="error">@_error</div>
+    }
+</div>
+
+@code {
+    private bool _busy;
+    private string? _error;
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        _busy = true;
+        _error = null;
+
+        try
+        {
+            var file = e.File;
+            var maxBytes = Options.Value.MaxUploadBytes;
+
+            // Check the size before opening the stream, so an oversized file gets a sentence rather
+            // than a circuit exception.
+            if (file.Size > maxBytes)
+            {
+                _error = $"That file is {file.Size / (1024 * 1024)} MB. The limit is {maxBytes / (1024 * 1024)} MB.";
+                return;
+            }
+
+            // maxAllowedSize is NOT optional: IBrowserFile.OpenReadStream defaults to 512 KB and
+            // throws above it. That default is the classic Blazor upload trap.
+            using var stream = file.OpenReadStream(maxAllowedSize: maxBytes);
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer);
+
+            // In-process — the page does NOT post to our own HTTP endpoint over loopback.
+            var result = await Ingest.IngestAsync(buffer.ToArray(), file.Name, "upload", null, CancellationToken.None);
+
+            if (!result.Ok)
+            {
+                _error = result.Error ?? "That file could not be opened.";
+                return;
+            }
+
+            Nav.NavigateTo($"/view/{result.Hash}");
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

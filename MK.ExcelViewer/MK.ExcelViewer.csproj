@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <RootNamespace>MK.ExcelViewer</RootNamespace>
+    <AssemblyName>MK.ExcelViewer</AssemblyName>
+    <!-- TFM / Nullable / ImplicitUsings / InvariantGlobalization come from
+         ../Directory.Build.props (house props, copied from ChatGateway). -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pinned to the version already used across the SPC tree (SPC.BO.Commission,
+         SPC.Blazor.Pricing, SPC.DAL.SQLite.RECRM) and already in the local cache. -->
+    <PackageReference Include="ClosedXML" Version="0.104.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="MK.ExcelViewer.Tests" />
+  </ItemGroup>
+
+</Project>

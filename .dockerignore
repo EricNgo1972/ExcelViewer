@@ -1,0 +1,26 @@
+# The build happens INSIDE Docker (multi-stage), so the context is the repo — keep it small and,
+# more importantly, keep runtime state out of it.
+
+# These MUST be **/-prefixed. .dockerignore patterns are anchored to the context root, so a bare
+# `obj/` matches only a top-level obj — and the one that actually matters is MK.ExcelViewer/obj,
+# which on a Windows dev box is full of absolute C:\ paths in project.assets.json. Copy that into
+# the Linux build and the restore fails in a thoroughly confusing way.
+**/bin/
+**/obj/
+publish/
+.git/
+.github/
+.vs/
+**/*.user
+**/*.suo
+
+# Runtime state — must never enter the build context. Do NOT use a bare `data/` pattern here: on a
+# case-insensitive filesystem (Windows, macOS) it would also match a `Data/` SOURCE folder.
+# (Borrowed from mk-FileConverter's .dockerignore, where that bit someone.)
+**/.state/
+**/*.db
+
+# Local-only
+docker-compose.yml
+README.md
+shot*.png

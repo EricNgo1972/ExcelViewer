@@ -1,0 +1,25 @@
+# Local development only. In the fleet this image is run by mk-provisioning, not by compose.
+services:
+  excelviewer:
+    build: .
+    image: mk-excelviewer:latest
+    container_name: mk-excelviewer
+    ports:
+      - "8080:8080"
+    environment:
+      # The origin handed back in viewUrl. Must be the address a HUMAN's browser can reach — the
+      # tunnel hostname, not the loopback the tunnel forwards to. Behind cloudflared this can be
+      # left empty, because X-Forwarded-Host/Proto already carry the public origin; set it only if
+      # you front the app with something that does not forward those.
+      - ExcelViewer__PublicBaseUrl=${EXCELVIEWER_BASEURL:-}
+      # Ingest is OPEN by design: the apps that publish workbooks here send no credentials.
+      # Set this to require an X-API-Key header on POST /api/workbooks.
+      - ExcelViewer__ApiKey=${EXCELVIEWER_APIKEY:-}
+    volumes:
+      # One mount holds all durable state: /var/lib/mk-excelviewer is symlinked to /data in the
+      # image, so the workbook store survives container recreation.
+      - excelviewer_state:/data
+    restart: unless-stopped
+
+volumes:
+  excelviewer_state:

@@ -1,0 +1,171 @@
+/* The app's own chrome. The workbook's generated CSS is scoped under #xv-* and cannot reach any of
+   this — which is the reason there is no component framework here: a global reset from one would
+   restyle the table/td/border-collapse rules the renderer emits, and we'd be fighting specificity
+   on the one page that matters. */
+
+:root {
+    --ink: #1f2328;
+    --muted: #656d76;
+    --line: #d8dee4;
+    --accent: #0969da;
+    --bg: #ffffff;
+    --bg-soft: #f6f8fa;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    color: var(--ink);
+    background: var(--bg);
+}
+
+.page { display: flex; flex-direction: column; min-height: 100vh; }
+
+.topbar {
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    height: 48px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-soft);
+    flex: none;
+}
+
+.brand { font-weight: 600; color: var(--ink); text-decoration: none; }
+
+main { padding: 16px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+h1 { font-size: 18px; margin: 0 0 4px; }
+
+.meta { color: var(--muted); font-size: 13px; }
+
+.sheet-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
+    flex: none;
+}
+
+.btn {
+    display: inline-block;
+    padding: 6px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg-soft);
+    color: var(--ink);
+    text-decoration: none;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.btn:hover { background: #eaeef2; }
+
+/* ── Sheet tabs ─────────────────────────────────────────────────────────────────────────── */
+.tabs {
+    display: flex;
+    gap: 2px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--line);
+    flex: none;
+}
+
+.tab {
+    padding: 6px 14px;
+    font-size: 13px;
+    color: var(--muted);
+    text-decoration: none;
+    border: 1px solid transparent;
+    border-bottom: 3px solid transparent;
+    white-space: nowrap;
+}
+
+.tab:hover { color: var(--ink); background: var(--bg-soft); }
+
+.tab.active {
+    color: var(--ink);
+    font-weight: 600;
+    background: var(--bg);
+    border-color: var(--line);
+    border-bottom-color: var(--accent);
+}
+
+/* ── The workbook surface ───────────────────────────────────────────────────────────────────
+   A single scroll container. position:sticky (frozen panes) resolves against the nearest scrolling
+   ancestor, so this element must be it — do NOT wrap the table in another overflow container or the
+   frozen rows silently stop sticking. */
+.viewport {
+    overflow: auto;
+    flex: 1;
+    min-height: 0;
+    border: 1px solid var(--line);
+    border-top: none;
+    background: var(--bg);
+}
+
+/* ── Cards, status, warnings ────────────────────────────────────────────────────────────── */
+.card {
+    max-width: 520px;
+    margin: 48px auto;
+    padding: 24px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    text-align: center;
+}
+
+.card.notfound { max-width: 560px; }
+.card p { color: var(--muted); }
+
+.drop {
+    display: block;
+    margin-top: 16px;
+    padding: 24px;
+    border: 2px dashed var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+    background: var(--bg-soft);
+}
+
+.drop:hover { border-color: var(--accent); }
+.drop.busy { opacity: .6; pointer-events: none; }
+.drop span { display: block; margin-top: 8px; color: var(--muted); }
+
+.error {
+    margin-top: 16px;
+    padding: 10px 12px;
+    border: 1px solid #ffc9c9;
+    border-radius: 6px;
+    background: #fff5f5;
+    color: #b42318;
+    text-align: left;
+}
+
+.warn {
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    border: 1px solid #f3e0a3;
+    border-radius: 6px;
+    background: #fffbeb;
+    color: #7a5b00;
+    font-size: 13px;
+    flex: none;
+}
+
+.status { padding: 32px; color: var(--muted); text-align: center; }
+
+.spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    vertical-align: -2px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }

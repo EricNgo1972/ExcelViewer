@@ -1,0 +1,91 @@
+@page "/open/{SessionId}"
+@inject MK.ExcelViewer.Sessions.SessionStore Sessions
+@inject NavigationManager Nav
+
+@* The page the user lands on IMMEDIATELY, before the sending app has transferred a single byte.
+   It watches the upload arrive, then hands off to /view/{hash}.
+
+   Static SSR with a small polling script — no @rendermode, no circuit. See wwwroot/js/open.js for
+   why. The server-rendered markup below is the first paint; the script takes it from there. *@
+
+<PageTitle>Maple XL Viewer@(_snapshot?.FileName is { } f ? $" : {f}" : "")</PageTitle>
+
+@if (_snapshot?.FileName is { } name)
+{
+    <SectionContent SectionName="topbar-title">
+        <span class="topbar-file" title="@name"><span class="sep">:</span>@name</span>
+    </SectionContent>
+}
+
+<div class="card progress-card" id="publish" data-session="@SessionId">
+    <h1 id="stage-title">@Heading()</h1>
+
+    <div class="bar" style="@(_gone ? "display:none" : "")">
+        <div class="bar-fill @(_determinate ? "" : "indeterminate")"
+             style="@(_determinate ? $"width:{_snapshot!.Percent}%" : "")"
+             id="bar-fill"></div>
+    </div>
+
+    <div class="error" id="stage-error" style="@(_snapshot?.Error is null ? "display:none" : "")">
+        @_snapshot?.Error
+    </div>
+
+    <p class="meta" id="stage-detail">@Detail()</p>
+
+    <a class="btn" href="/" id="stage-action" style="@(_gone ? "" : "display:none")">
+        Open a workbook yourself
+    </a>
+</div>
+
+<script src="js/open.js" defer></script>
+
+@code {
+    [Parameter] public string SessionId { get; set; } = "";
+
+    private SessionSnapshot? _snapshot;
+
+    // "Gone" = there is nothing left to wait for: the session expired, or the publish failed.
+    private bool _gone => _snapshot is null || _snapshot.Stage == UploadStage.Failed;
+
+    private bool _determinate =>
+        _snapshot is { Stage: UploadStage.Receiving, Percent: not null };
+
+    protected override void OnInitialized()
+    {
+        _snapshot = Sessions.Get(SessionId)?.Snapshot();
+
+        // Already finished — a small file, or the user re-opened the link. Redirect server-side
+        // rather than paint a spinner and let the script bounce them a moment later. Under static
+        // SSR this becomes a real HTTP redirect.
+        if (_snapshot is { Stage: UploadStage.Ready, Hash: { } hash })
+            Nav.NavigateTo($"/view/{hash}");
+    }
+
+    private string Heading() => _snapshot switch
+    {
+        null => "This link has expired",
+        { Stage: UploadStage.Failed } => "That workbook couldn’t be opened",
+        { Stage: UploadStage.Waiting } => "Waiting for the file…",
+        { Stage: UploadStage.Receiving } => "Receiving the file…",
+        { Stage: UploadStage.Opening } => "Opening the workbook…",
+        _ => "Ready",
+    };
+
+    private string Detail() => _snapshot switch
+    {
+        null => "The app that opened this never finished sending the file. Ask it to try again.",
+        { Stage: UploadStage.Waiting } => "The app that sent you here is preparing the report.",
+        { Stage: UploadStage.Receiving, Percent: { } p } => $"{p}% of {Size(_snapshot.TotalBytes)}",
+        { Stage: UploadStage.Receiving } => $"{Size(_snapshot.ReceivedBytes)} received",
+        { Stage: UploadStage.Opening } => "Reading the sheets and applying formatting. Large reports take a few seconds.",
+        _ => "",
+    };
+
+    private static string Size(long? bytes) => bytes switch
+    {
+        null => "",
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024.0:0.#} KB",
+        _ => $"{bytes / (1024.0 * 1024.0):0.#} MB",
+    };
+}

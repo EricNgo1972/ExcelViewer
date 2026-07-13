@@ -18,9 +18,99 @@ your app ──POST the .xlsx──▶ ExcelViewer ──returns {viewUrl}──
 
 # Sending a workbook
 
-## The whole integration, in one call
+There are two flows. Use the **watchable** one if a person is waiting — which is almost always.
+
+| | [Watchable](#watchable-open-the-viewer-first-recommended) | [One-shot](#one-shot-simplest) |
+|---|---|---|
+| Browser opens | **immediately** | after the upload *and* the parse finish |
+| User sees | "Receiving 43% of 5.9 MB", then "Opening the workbook…" | nothing, then the workbook |
+| Errors | shown on the page | your app must handle them |
+| Calls | 2 (create session, upload) | 1 |
+
+A 6 MB report takes a couple of seconds to upload and ~10 to parse. In the one-shot flow the user
+stares at nothing for all of it, because the browser doesn't open until it's over.
+
+## Watchable: open the viewer first (recommended)
+
+1. **Create a session** — instant, returns immediately.
+2. **Open `viewUrl` in the browser right away.** The page appears and starts reporting progress.
+3. **`PUT` the bytes.** The page tracks them landing, then hands off to the workbook by itself.
+
+```bash
+# 1. create — returns in milliseconds
+curl -X POST -H "Content-Type: application/json" \
+     -d '{"fileName":"VatReport.xlsx","sizeBytes":6042000}' \
+     https://excel.maplekiosk.ca/api/sessions
+# -> { "sessionId": "...", "viewUrl": ".../open/...", "uploadUrl": ".../api/sessions/.../content" }
+
+# 2. open viewUrl in the user's browser NOW
+
+# 3. send the bytes; the page follows along
+curl -X PUT --data-binary @VatReport.xlsx \
+     -H "X-File-Name: VatReport.xlsx" \
+     "$uploadUrl"
+```
+
+`sizeBytes` is optional but worth sending: with it the page shows a real percentage, without it just
+a moving bar. The upload is raw bytes, not multipart, precisely so the server can count them as they
+arrive.
+
+```csharp
+/// <summary>
+/// Publishes a workbook so the user can WATCH it arrive. Returns the URL to open immediately —
+/// before the file has been sent — then streams the bytes into the session behind it.
+/// </summary>
+public async Task<string?> PublishWatchableAsync(byte[] workbook, string fileName, CancellationToken ct = default)
+{
+    var origin = _settings.Endpoint.TrimEnd('/');
+
+    // 1. Create the session. Instant — nothing is uploaded yet.
+    using var create = await http.PostAsJsonAsync($"{origin}/api/sessions",
+        new { fileName, sizeBytes = workbook.LongLength }, ct);
+
+    if (!create.IsSuccessStatusCode) return null;
+
+    var session = await create.Content.ReadFromJsonAsync<SessionResponse>(ct);
+    if (session is null) return null;
+
+    // 2. Hand the URL back NOW, and upload in the background. The user is already looking at the
+    //    progress page while these bytes are still in flight.
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            using var content = new ByteArrayContent(workbook);
+            using var req = new HttpRequestMessage(HttpMethod.Put, session.UploadUrl) { Content = content };
+            req.Headers.Add("X-File-Name", fileName);
+            await http.SendAsync(req, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            // The viewer page surfaces the failure to the user on its own; just record it.
+            log.LogError(ex, "ExcelViewer upload failed for {File}", fileName);
+        }
+    }, CancellationToken.None);
+
+    return session.ViewUrl;
+}
+
+private sealed record SessionResponse(string SessionId, string ViewUrl, string UploadUrl);
+```
+
+```csharp
+var viewUrl = await viewer.PublishWatchableAsync(xlsxBytes, "VatReport.xlsx", ct);
+if (viewUrl is not null) return Redirect(viewUrl);      // opens instantly; the page does the rest
+```
+
+**If anything goes wrong, the page says so** — a corrupt workbook, a Word file, a file too large, an
+interrupted upload. You don't have to surface those yourself; the user is already looking at the page
+that reports them.
+
+## One-shot: simplest
 
 `POST /api/workbooks` — `multipart/form-data`, one part named **`file`**. **No authentication.**
+The call blocks through upload *and* parse, then returns the URL. Fine for small workbooks, or when
+no human is waiting.
 
 ```bash
 curl -F "file=@report.xlsx" https://excel.maplekiosk.ca/api/workbooks
@@ -203,7 +293,11 @@ user the `.xlsx`. The client above is written that way — it returns `null` and
 
 | | |
 |---|---|
-| `POST /api/workbooks` | Publish. `multipart/form-data`, part named `file`. → `201` (or `200` if cached). |
+| `POST /api/sessions` | Start a watchable publish. Optional `{fileName, sizeBytes}`. → `201 {sessionId, viewUrl, uploadUrl}`. Instant. |
+| `PUT /api/sessions/{id}/content` | The raw bytes (not multipart), `X-File-Name` header. Progress is tracked as they arrive. → `200 {hash, viewUrl}`. |
+| `GET /api/sessions/{id}` | Poll a publish: `{stage, percent, receivedBytes, totalBytes, hash, error}`. Stages: `waiting` → `receiving` → `opening` → `ready` \| `failed`. |
+| `GET /open/{sessionId}` | The progress page a user opens **before** the file is sent. Redirects to the workbook on its own. |
+| `POST /api/workbooks` | One-shot publish. `multipart/form-data`, part named `file`. → `201` (or `200` if cached). |
 | `GET /view/{hash}` | The viewer page. Add `?sheet=2` to open a specific sheet. |
 | `GET /api/workbooks/{hash}/original` | Download the exact bytes that were posted. |
 | `GET /health` | Liveness — what the container's HEALTHCHECK hits. |

@@ -12,6 +12,7 @@ using MK.ExcelViewer.Ingest;
 using MK.ExcelViewer.Options;
 using MK.ExcelViewer.Rendering;
 using MK.ExcelViewer.Security;
+using MK.ExcelViewer.Sessions;
 using MK.ExcelViewer.Storage;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -112,6 +113,7 @@ builder.Services.AddSingleton<WorkbookRenderer>();
 builder.Services.AddSingleton<RenderCache>();
 builder.Services.AddSingleton<WorkbookStore>();
 builder.Services.AddSingleton<WorkbookIngestService>();
+builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddHostedService<RetentionSweeper>();
 
 var perIpPerMinute = cfg.GetValue("PerIpPerMinute", 60);
@@ -251,15 +253,19 @@ app.MapPost("/api/workbooks", async (
     };
 }).RequireRateLimiting("ingest").DisableAntiforgery();
 
+/// <summary>
+/// The origin to put in URLs we hand back. PublicBaseUrl wins when set: the request may have arrived
+/// over an internal or loopback address, but these URLs get opened in a HUMAN's browser.
+/// </summary>
+static string PublicBase(HttpContext http, ExcelViewerOptions opts) =>
+    string.IsNullOrWhiteSpace(opts.PublicBaseUrl)
+        ? $"{http.Request.Scheme}://{http.Request.Host}"
+        : opts.PublicBaseUrl.TrimEnd('/');
+
 static IResult Respond(IngestResult result, HttpContext http, WorkbookStore store, ExcelViewerOptions opts)
 {
     var meta = result.Meta!;
-
-    // PublicBaseUrl wins when set: the POST may have arrived over an internal address, but this URL
-    // is about to be opened in a human's browser.
-    var baseUrl = string.IsNullOrWhiteSpace(opts.PublicBaseUrl)
-        ? $"{http.Request.Scheme}://{http.Request.Host}"
-        : opts.PublicBaseUrl.TrimEnd('/');
+    var baseUrl = PublicBase(http, opts);
 
     var body = new
     {
@@ -279,6 +285,150 @@ static IResult Respond(IngestResult result, HttpContext http, WorkbookStore stor
         ? Results.Created($"{baseUrl}/view/{meta.Hash}", body)
         : Results.Ok(body);
 }
+
+// ── Watchable publish: open the viewer first, then send the file ────────────────────────────
+// POST /api/workbooks is synchronous — the caller blocks through the upload AND the parse, and only
+// then gets a URL to open. For a big report that means the user stares at nothing for ten seconds.
+//
+// This flow inverts that: create a session (instant), open the browser at once, and stream the file
+// into the session while the page watches it arrive.
+//
+//   1. POST /api/sessions        -> { sessionId, viewUrl, uploadUrl }   (instant)
+//   2. open viewUrl in the browser                                       (user sees progress)
+//   3. PUT  uploadUrl  with the bytes                                    (page tracks % as it lands)
+
+app.MapPost("/api/sessions", (SessionRequest? body, HttpContext http, IOptions<ExcelViewerOptions> opts) =>
+{
+    var store = http.RequestServices.GetRequiredService<SessionStore>();
+    var session = store.Create(body?.FileName, body?.SizeBytes);
+
+    var baseUrl = PublicBase(http, opts.Value);
+
+    return Results.Json(new
+    {
+        sessionId = session.Id,
+        viewUrl = $"{baseUrl}/open/{session.Id}",
+        uploadUrl = $"{baseUrl}/api/sessions/{session.Id}/content",
+    }, statusCode: StatusCodes.Status201Created);
+}).RequireRateLimiting("ingest").DisableAntiforgery();
+
+// The raw bytes, streamed. Not multipart: we want to count bytes as they arrive so the page can show
+// a real percentage, and Content-Length gives us the denominator for free.
+app.MapPut("/api/sessions/{id}/content", async (
+    string id,
+    HttpRequest request,
+    HttpContext http,
+    SessionStore sessions,
+    WorkbookIngestService ingest,
+    IOptions<ExcelViewerOptions> opts,
+    CancellationToken ct) =>
+{
+    var session = sessions.Get(id);
+    if (session is null)
+        return Results.NotFound(new { error = "Unknown or expired session." });
+
+    var declared = request.ContentLength;
+    if (declared > opts.Value.MaxUploadBytes)
+    {
+        var tooBig = $"File exceeds the {opts.Value.MaxUploadBytes / (1024 * 1024)} MB limit.";
+        session.Fail(tooBig);
+        return Results.Json(new { error = tooBig }, statusCode: StatusCodes.Status413PayloadTooLarge);
+    }
+
+    var fileName = request.Headers["X-File-Name"].ToString();
+    if (string.IsNullOrWhiteSpace(fileName)) fileName = "workbook.xlsx";
+    fileName = Path.GetFileName(fileName);
+
+    session.BeginReceiving(fileName, declared);
+
+    byte[] bytes;
+    try
+    {
+        // Copy by hand rather than CopyToAsync so each chunk can move the progress bar. 64 KB is
+        // small enough that the bar moves smoothly on a slow link and large enough to be free.
+        using var buffer = new MemoryStream(capacity: (int)Math.Min(declared ?? 0, 8 * 1024 * 1024));
+        var chunk = new byte[64 * 1024];
+        long total = 0;
+
+        int read;
+        while ((read = await request.Body.ReadAsync(chunk, ct)) > 0)
+        {
+            total += read;
+
+            // Enforce the cap against what has ACTUALLY arrived — Content-Length is the sender's
+            // claim, and a sender that lies about it must not get to stream us an unbounded body.
+            if (total > opts.Value.MaxUploadBytes)
+            {
+                var tooBig = $"File exceeds the {opts.Value.MaxUploadBytes / (1024 * 1024)} MB limit.";
+                session.Fail(tooBig);
+                return Results.Json(new { error = tooBig }, statusCode: StatusCodes.Status413PayloadTooLarge);
+            }
+
+            await buffer.WriteAsync(chunk.AsMemory(0, read), ct);
+            session.Progress(total);
+        }
+
+        bytes = buffer.ToArray();
+    }
+    catch (Exception ex) when (ex is IOException or OperationCanceledException)
+    {
+        session.Fail("The upload was interrupted before the whole file arrived.");
+        return Results.BadRequest(new { error = "Upload interrupted." });
+    }
+
+    if (bytes.Length == 0)
+    {
+        session.Fail("The sending app uploaded an empty file.");
+        return Results.BadRequest(new { error = "Empty body." });
+    }
+
+    // Everything is here; now the slow part the user is waiting on.
+    session.Opening();
+
+    var ip = http.Connection.RemoteIpAddress?.ToString();
+    var result = await ingest.IngestAsync(bytes, fileName, "session", ip, ct);
+
+    if (!result.Ok)
+    {
+        session.Fail(result.Error ?? "The workbook could not be opened.");
+
+        return result.Status switch
+        {
+            IngestStatus.TooLarge => Results.Json(new { error = result.Error }, statusCode: StatusCodes.Status413PayloadTooLarge),
+            IngestStatus.Unsupported => Results.Json(new { error = result.Error }, statusCode: StatusCodes.Status415UnsupportedMediaType),
+            _ => Results.BadRequest(new { error = result.Error }),
+        };
+    }
+
+    session.Ready(result.Hash!);
+
+    var baseUrl = PublicBase(http, opts.Value);
+    return Results.Ok(new
+    {
+        hash = result.Hash,
+        viewUrl = $"{baseUrl}/view/{result.Hash}",
+        cached = result.Status == IngestStatus.AlreadyExisted,
+    });
+}).RequireRateLimiting("ingest").DisableAntiforgery();
+
+// Lets the SENDING app poll too — useful when it wants to know the publish landed.
+app.MapGet("/api/sessions/{id}", (string id, SessionStore sessions) =>
+{
+    var session = sessions.Get(id);
+    if (session is null) return Results.NotFound(new { error = "Unknown or expired session." });
+
+    var s = session.Snapshot();
+    return Results.Json(new
+    {
+        stage = s.Stage.ToString().ToLowerInvariant(),
+        fileName = s.FileName,
+        receivedBytes = s.ReceivedBytes,
+        totalBytes = s.TotalBytes,
+        percent = s.Percent,
+        hash = s.Hash,
+        error = s.Error,
+    });
+});
 
 // ── GET /api/workbooks/{hash}/original ──────────────────────────────────────────────────────
 app.MapGet("/api/workbooks/{hash}/original", async (string hash, WorkbookStore store, CancellationToken ct) =>
@@ -333,3 +483,6 @@ app.MapGet("/api/health", (WorkbookStore store) =>
 app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
 
 app.Run();
+
+/// <summary>Optional hints from the sender, so the page can name the file and show a real percentage.</summary>
+public sealed record SessionRequest(string? FileName, long? SizeBytes);

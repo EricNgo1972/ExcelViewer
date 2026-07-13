@@ -14,15 +14,29 @@
 
 * { box-sizing: border-box; }
 
+html, body { height: 100%; }
+
 body {
     margin: 0;
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
     font-size: 14px;
     color: var(--ink);
     background: var(--bg);
+    /* The GRID scrolls, not the document. Without this the page itself scrolls, and a wide sheet's
+       horizontal scrollbar ends up at the bottom of a very tall .viewport — hundreds of pixels below
+       the fold, where nobody will ever find it, so the right-hand columns look simply unreachable. */
+    overflow: hidden;
 }
 
-.page { display: flex; flex-direction: column; min-height: 100vh; }
+/* height, not min-height: the layout must FILL the window exactly, so that .viewport inherits a
+   real height budget and becomes the single scroll container. min-height lets it grow instead,
+   which is what silently broke horizontal scrolling on tall+wide sheets. */
+.page {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;      /* dvh accounts for mobile browser chrome; harmless elsewhere */
+}
 
 .topbar {
     display: flex;
@@ -67,7 +81,17 @@ body {
 /* Pushes the actions to the right edge; it is the only element allowed to grow. */
 .topbar-spacer { flex: 1 1 auto; min-width: 8px; }
 
-main { padding: 16px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* min-height:0 is the load-bearing bit: without it a flex child refuses to shrink below its content
+   height, so .viewport would never get a bounded height budget to scroll within. overflow:auto is
+   only for the small card pages (upload / not-found) on a short window. */
+main {
+    padding: 16px;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: auto;
+}
 
 h1 { font-size: 18px; margin: 0 0 4px; }
 

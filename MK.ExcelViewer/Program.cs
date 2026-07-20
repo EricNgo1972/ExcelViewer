@@ -190,10 +190,15 @@ app.Use(async (ctx, next) =>
     var opts = ctx.RequestServices.GetRequiredService<IOptions<ExcelViewerOptions>>().Value;
     var path = ctx.Request.Path;
 
+    // BOTH ingest nouns must be gated. /api/documents is the MK.WordViewer-compatible alias, and an
+    // alias that skipped this check would be an unauthenticated way in to the same handler.
+    var isIngestPost =
+        (path.StartsWithSegments("/api/workbooks") || path.StartsWithSegments("/api/documents"))
+        && HttpMethods.IsPost(ctx.Request.Method);
+
     var authorized =
         path.StartsWithSegments("/api/health") ? ApiKeyGuard.IsAuthorizedForHealth(ctx, opts)
-        : path.StartsWithSegments("/api/workbooks") && HttpMethods.IsPost(ctx.Request.Method)
-            ? ApiKeyGuard.IsAuthorized(ctx, opts)
+        : isIngestPost ? ApiKeyGuard.IsAuthorized(ctx, opts)
         : true;
 
     if (!authorized)
@@ -212,13 +217,19 @@ app.UseAntiforgery();
 // Synchronous: ClosedXML parses in milliseconds, in-process. mk-FileConverter's 202/jobId/polling
 // handshake exists because LibreOffice is slow; here it would be pure ceremony. So: 201 with the
 // viewUrl in the body and in Location.
-app.MapPost("/api/workbooks", async (
+// Two nouns, one handler. /api/workbooks is this app's own name; /api/documents is MK.WordViewer's,
+// served here so a single client class works against either service with only the base URL changing.
+// If you add another alias, add it to the X-API-Key gate above too.
+app.MapPost("/api/workbooks", PostWorkbook).RequireRateLimiting("ingest").DisableAntiforgery();
+app.MapPost("/api/documents", PostWorkbook).RequireRateLimiting("ingest").DisableAntiforgery();
+
+static async Task<IResult> PostWorkbook(
     HttpRequest request,
     HttpContext http,
     WorkbookIngestService ingest,
     WorkbookStore store,
     IOptions<ExcelViewerOptions> opts,
-    CancellationToken ct) =>
+    CancellationToken ct)
 {
     if (!request.HasFormContentType)
         return Results.BadRequest(new { error = "Expected multipart/form-data." });
@@ -251,7 +262,7 @@ app.MapPost("/api/workbooks", async (
         IngestStatus.Unreadable => Results.BadRequest(new { error = result.Error }),
         _ => Respond(result, http, store, opts.Value),
     };
-}).RequireRateLimiting("ingest").DisableAntiforgery();
+}
 
 /// <summary>
 /// The origin to put in URLs we hand back. PublicBaseUrl wins when set: the request may have arrived
@@ -431,7 +442,11 @@ app.MapGet("/api/sessions/{id}", (string id, SessionStore sessions) =>
 });
 
 // ── GET /api/workbooks/{hash}/original ──────────────────────────────────────────────────────
-app.MapGet("/api/workbooks/{hash}/original", async (string hash, WorkbookStore store, CancellationToken ct) =>
+// Both nouns again, for the same reason as the POST above.
+app.MapGet("/api/workbooks/{hash}/original", GetOriginal);
+app.MapGet("/api/documents/{hash}/original", GetOriginal);
+
+static async Task<IResult> GetOriginal(string hash, WorkbookStore store, CancellationToken ct)
 {
     var meta = await store.TryGetMetaAsync(hash, ct);
     if (meta is null)
@@ -444,7 +459,7 @@ app.MapGet("/api/workbooks/{hash}/original", async (string hash, WorkbookStore s
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         meta.FileName,
         enableRangeProcessing: true);
-});
+}
 
 // ── Health ──────────────────────────────────────────────────────────────────────────────────
 // Cheap liveness for the proxy, and a deeper one that proves the store is actually writable —

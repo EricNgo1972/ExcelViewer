@@ -300,6 +300,17 @@ user the `.xlsx`. The client above is written that way — it returns `null` and
 | `POST /api/workbooks` | One-shot publish. `multipart/form-data`, part named `file`. → `201` (or `200` if cached). |
 | `GET /view/{hash}` | The viewer page. Add `?sheet=2` to open a specific sheet. |
 | `GET /api/workbooks/{hash}/original` | Download the exact bytes that were posted. |
+
+### One client, both services
+
+**`/api/documents` is served here as an alias for `/api/workbooks`**, and MK.WordViewer (the `.docx`
+sibling) serves `/api/workbooks` as an alias for `/api/documents`. Both nouns hit the same handler on
+both services — same rate limit, same `X-API-Key` gate — so a single client class works against either
+one with only the base URL changing. Pick whichever noun you prefer and use it everywhere.
+
+The only response difference: this service adds `sheetCount` and `sheetNames`, which WordViewer omits.
+Everything else — `hash`, `fileName`, `sizeBytes`, `viewUrl`, `downloadUrl`, `cached`, `expiresUtc` —
+is identical, as are the session endpoints, status codes, and the `{"error": "…"}` body shape.
 | `GET /health` | Liveness — what the container's HEALTHCHECK hits. |
 | `GET /api/health` | Deeper: proves the storage root is writable; reports workbook count and bytes used. |
 

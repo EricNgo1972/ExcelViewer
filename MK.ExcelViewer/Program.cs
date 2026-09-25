@@ -15,6 +15,8 @@ using MK.ExcelViewer.Security;
 using MK.ExcelViewer.Sessions;
 using MK.ExcelViewer.Storage;
 
+const string SourceClient = "source";
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<ExcelViewerOptions>(
@@ -115,6 +117,12 @@ builder.Services.AddSingleton<WorkbookStore>();
 builder.Services.AddSingleton<WorkbookIngestService>();
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddHostedService<RetentionSweeper>();
+
+// GET /fetch's downloader. Redirects OFF: SourceUrlGuard vets the URL we were given, and a redirect
+// would let a whitelisted host send us to one it never vetted. The timeout is enforced per fetch.
+builder.Services.AddHttpClient(SourceClient)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false })
+    .ConfigureHttpClient(c => c.Timeout = Timeout.InfiniteTimeSpan);
 
 var perIpPerMinute = cfg.GetValue("PerIpPerMinute", 60);
 builder.Services.AddRateLimiter(rl =>
@@ -338,17 +346,105 @@ app.MapPut("/api/sessions/{id}/content", async (
     if (session is null)
         return Results.NotFound(new { error = "Unknown or expired session." });
 
-    var declared = request.ContentLength;
-    if (declared > opts.Value.MaxUploadBytes)
-    {
-        var tooBig = $"File exceeds the {opts.Value.MaxUploadBytes / (1024 * 1024)} MB limit.";
-        session.Fail(tooBig);
-        return Results.Json(new { error = tooBig }, statusCode: StatusCodes.Status413PayloadTooLarge);
-    }
-
     var fileName = request.Headers["X-File-Name"].ToString();
     if (string.IsNullOrWhiteSpace(fileName)) fileName = "workbook.xlsx";
     fileName = Path.GetFileName(fileName);
+
+    var ip = http.Connection.RemoteIpAddress?.ToString();
+    var received = await ReceiveIntoSession(
+        session, request.Body, request.ContentLength, fileName, "session", ip, ingest, opts.Value, ct);
+
+    if (received.Hash is null)
+        return Results.Json(new { error = received.Error }, statusCode: received.StatusCode);
+
+    var baseUrl = PublicBase(http, opts.Value);
+    return Results.Ok(new
+    {
+        hash = received.Hash,
+        viewUrl = $"{baseUrl}/view/{received.Hash}",
+        cached = received.Cached,
+    });
+}).RequireRateLimiting("ingest").DisableAntiforgery();
+
+// ── GET /fetch?src=…&name=… : open a workbook by LINK ─────────────────────────────────────────
+// For callers that can only open a URL, not upload — Cloudreve's custom file viewer is the one this
+// was built for: https://excel.example/fetch?src={$src}&name={$name}. The same watchable flow, with
+// us as the sender: redirect the browser to /open/{id} at once, then download into the session in
+// the background while the page tracks it.
+//
+// Opened by a browser, so it can't carry X-API-Key. The gate is SourceHosts instead: we only ever
+// download from hosts the operator named, and with none named this endpoint does not exist.
+app.MapGet("/fetch", (
+    string? src,
+    string? name,
+    HttpContext http,
+    SessionStore sessions,
+    WorkbookIngestService ingest,
+    IHttpClientFactory clients,
+    IHostApplicationLifetime lifetime,
+    ILogger<Program> log,
+    IOptions<ExcelViewerOptions> opts) =>
+{
+    var o = opts.Value;
+    if (o.SourceHosts.Length == 0)
+        return Results.NotFound(new { error = "Opening by link is not enabled on this server (ExcelViewer:SourceHosts is empty)." });
+    if (!SourceUrlGuard.TryParse(src, o.SourceHosts, out var uri))
+        return Results.BadRequest(new { error = "src must be an https link on a host this server is allowed to fetch from." });
+
+    var fileName = SourceUrlGuard.FileName(name, uri, "workbook.xlsx");
+    var session = sessions.Create(fileName, totalBytes: null);
+    var ip = http.Connection.RemoteIpAddress?.ToString();
+
+    // Not tied to the request: it ends the moment we redirect. Bounded by FetchTimeoutSeconds and
+    // app shutdown instead.
+    _ = Task.Run(async () =>
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(lifetime.ApplicationStopping);
+        cts.CancelAfter(TimeSpan.FromSeconds(o.FetchTimeoutSeconds));
+        try
+        {
+            using var response = await clients.CreateClient(SourceClient)
+                .GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                session.Fail($"The file server refused the download (HTTP {(int)response.StatusCode}). The link may have expired — open the file again.");
+                return;
+            }
+
+            await using var body = await response.Content.ReadAsStreamAsync(cts.Token);
+            await ReceiveIntoSession(session, body, response.Content.Headers.ContentLength,
+                fileName, "fetch", ip, ingest, o, cts.Token);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException)
+        {
+            log.LogWarning(ex, "GET /fetch from {Host} failed.", uri.Host);
+            session.Fail("The file could not be downloaded from the file server.");
+        }
+    });
+
+    return Results.Redirect($"/open/{session.Id}");
+}).RequireRateLimiting("ingest");
+
+// Streams a workbook into a session and ingests it — the one path behind both the PUT upload and
+// GET /fetch, so they share the size caps and the progress reporting. Every failure is also written
+// to the session, which is what the /open page shows.
+static async Task<Received> ReceiveIntoSession(
+    UploadSession session,
+    Stream body,
+    long? declared,
+    string fileName,
+    string source,
+    string? ip,
+    WorkbookIngestService ingest,
+    ExcelViewerOptions opts,
+    CancellationToken ct)
+{
+    var tooBig = $"File exceeds the {opts.MaxUploadBytes / (1024 * 1024)} MB limit.";
+    if (declared > opts.MaxUploadBytes)
+    {
+        session.Fail(tooBig);
+        return Received.Failed(StatusCodes.Status413PayloadTooLarge, tooBig);
+    }
 
     session.BeginReceiving(fileName, declared);
 
@@ -362,17 +458,16 @@ app.MapPut("/api/sessions/{id}/content", async (
         long total = 0;
 
         int read;
-        while ((read = await request.Body.ReadAsync(chunk, ct)) > 0)
+        while ((read = await body.ReadAsync(chunk, ct)) > 0)
         {
             total += read;
 
             // Enforce the cap against what has ACTUALLY arrived — Content-Length is the sender's
             // claim, and a sender that lies about it must not get to stream us an unbounded body.
-            if (total > opts.Value.MaxUploadBytes)
+            if (total > opts.MaxUploadBytes)
             {
-                var tooBig = $"File exceeds the {opts.Value.MaxUploadBytes / (1024 * 1024)} MB limit.";
                 session.Fail(tooBig);
-                return Results.Json(new { error = tooBig }, statusCode: StatusCodes.Status413PayloadTooLarge);
+                return Received.Failed(StatusCodes.Status413PayloadTooLarge, tooBig);
             }
 
             await buffer.WriteAsync(chunk.AsMemory(0, read), ct);
@@ -384,43 +479,35 @@ app.MapPut("/api/sessions/{id}/content", async (
     catch (Exception ex) when (ex is IOException or OperationCanceledException)
     {
         session.Fail("The upload was interrupted before the whole file arrived.");
-        return Results.BadRequest(new { error = "Upload interrupted." });
+        return Received.Failed(StatusCodes.Status400BadRequest, "Upload interrupted.");
     }
 
     if (bytes.Length == 0)
     {
         session.Fail("The sending app uploaded an empty file.");
-        return Results.BadRequest(new { error = "Empty body." });
+        return Received.Failed(StatusCodes.Status400BadRequest, "Empty body.");
     }
 
     // Everything is here; now the slow part the user is waiting on.
     session.Opening();
 
-    var ip = http.Connection.RemoteIpAddress?.ToString();
-    var result = await ingest.IngestAsync(bytes, fileName, "session", ip, ct);
+    var result = await ingest.IngestAsync(bytes, fileName, source, ip, ct);
 
     if (!result.Ok)
     {
         session.Fail(result.Error ?? "The workbook could not be opened.");
 
-        return result.Status switch
+        return Received.Failed(result.Status switch
         {
-            IngestStatus.TooLarge => Results.Json(new { error = result.Error }, statusCode: StatusCodes.Status413PayloadTooLarge),
-            IngestStatus.Unsupported => Results.Json(new { error = result.Error }, statusCode: StatusCodes.Status415UnsupportedMediaType),
-            _ => Results.BadRequest(new { error = result.Error }),
-        };
+            IngestStatus.TooLarge => StatusCodes.Status413PayloadTooLarge,
+            IngestStatus.Unsupported => StatusCodes.Status415UnsupportedMediaType,
+            _ => StatusCodes.Status400BadRequest,
+        }, result.Error);
     }
 
     session.Ready(result.Hash!);
-
-    var baseUrl = PublicBase(http, opts.Value);
-    return Results.Ok(new
-    {
-        hash = result.Hash,
-        viewUrl = $"{baseUrl}/view/{result.Hash}",
-        cached = result.Status == IngestStatus.AlreadyExisted,
-    });
-}).RequireRateLimiting("ingest").DisableAntiforgery();
+    return new Received(StatusCodes.Status200OK, result.Hash, result.Status == IngestStatus.AlreadyExisted, null);
+}
 
 // Lets the SENDING app poll too — useful when it wants to know the publish landed.
 app.MapGet("/api/sessions/{id}", (string id, SessionStore sessions) =>
@@ -501,3 +588,9 @@ app.Run();
 
 /// <summary>Optional hints from the sender, so the page can name the file and show a real percentage.</summary>
 public sealed record SessionRequest(string? FileName, long? SizeBytes);
+
+/// <summary>How a receive ended: a hash on success, otherwise the HTTP status and message for the sender.</summary>
+public sealed record Received(int StatusCode, string? Hash, bool Cached, string? Error)
+{
+    public static Received Failed(int statusCode, string? error) => new(statusCode, null, false, error);
+}

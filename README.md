@@ -267,6 +267,39 @@ to live longer, raise `RetentionDays` on the server.
 
 ---
 
+## Opening by link (Cloudreve)
+
+Some callers can only **open a URL** — they can't upload. Cloudreve's custom file viewers are the
+case this was built for. `GET /fetch?src={link}&name={file name}` is the watchable flow with the
+viewer as the sender: it redirects the browser to `/open/{id}` at once, downloads the workbook from
+`src` in the background, and the page follows it to `/view/{hash}` as usual.
+
+It is **off until you name the hosts it may download from** — without a whitelist it would fetch any
+URL a stranger names, from inside our network:
+
+```
+ExcelViewer__SourceHosts__0=files.phoebus.asia
+ExcelViewer__SourceHosts__1=files.other-tenant.example
+```
+
+Only `https`, only an exact listed host on the default port, and redirects are not followed. A link
+that fails any of that gets `400`; with no hosts listed `/fetch` is `404`.
+
+**Wiring it into Cloudreve** (Dashboard → File System → File Apps → Add → Custom viewer):
+
+| Field | Value |
+|---|---|
+| URL | `https://excel.maplekiosk.ca/fetch?src={$src}&name={$name}` |
+| Extensions | `xlsx` |
+| Open in new window | **On** — the viewer can't be framed (see above), so Cloudreve's built-in preview window would be blank |
+
+Cloudreve builds `{$src}` from its **Site URL** setting, so that must be the public address
+(`https://files.phoebus.asia`), not the default `http://localhost:5212` — and that host is what goes
+in `SourceHosts`. The signed link expires after a while; reopening the file in Cloudreve makes a
+new one.
+
+---
+
 # Handling failures
 
 Every error is `{"error": "a sentence you can show or log"}`.
@@ -297,6 +330,7 @@ user the `.xlsx`. The client above is written that way — it returns `null` and
 | `PUT /api/sessions/{id}/content` | The raw bytes (not multipart), `X-File-Name` header. Progress is tracked as they arrive. → `200 {hash, viewUrl}`. |
 | `GET /api/sessions/{id}` | Poll a publish: `{stage, percent, receivedBytes, totalBytes, hash, error}`. Stages: `waiting` → `receiving` → `opening` → `ready` \| `failed`. |
 | `GET /open/{sessionId}` | The progress page a user opens **before** the file is sent. Redirects to the workbook on its own. |
+| `GET /fetch?src=&name=` | Open a workbook by link: redirects to `/open/{id}` and downloads `src` in the background. Off unless `SourceHosts` is set. |
 | `POST /api/workbooks` | One-shot publish. `multipart/form-data`, part named `file`. → `201` (or `200` if cached). |
 | `GET /view/{hash}` | The viewer page. Add `?sheet=2` to open a specific sheet. |
 | `GET /api/workbooks/{hash}/original` | Download the exact bytes that were posted. |
@@ -432,6 +466,8 @@ One `ExcelViewer` section; secrets come from the environment with double undersc
 | `ParseTimeoutSeconds` | 60 | |
 | `RenderCacheMinutes` / `RenderCacheBudgetMb` | 20 / 256 | Rendered workbooks cached by hash, so switching sheet tabs never re-parses. A **byte** budget, not an entry count — one big report must evict several small ones rather than sit alongside them. |
 | `PerIpPerMinute` | 60 | Rate limit on publishing. 0 disables. |
+| `SourceHosts` | `[]` | Hosts `GET /fetch` may download from, exact names. **Empty = `/fetch` is off.** |
+| `FetchTimeoutSeconds` | 120 | Cap on one `/fetch` download. |
 
 ---
 

@@ -72,4 +72,16 @@ public sealed class ExcelViewerOptions
 
     /// <summary>Per-IP fixed window on ingest. 0 disables.</summary>
     public int PerIpPerMinute { get; set; } = 60;
+
+    /// <summary>
+    /// Hosts GET /fetch may download a workbook from — exact names, e.g. "files.phoebus.asia". This is
+    /// what lets a file manager (Cloudreve's custom viewer) open a document by handing us a signed link
+    /// instead of uploading it. EMPTY MEANS /fetch IS OFF: without a whitelist it would be an open proxy
+    /// that fetches any URL a stranger names, from inside our network.
+    /// Set via the environment: ExcelViewer__SourceHosts__0=files.phoebus.asia
+    /// </summary>
+    public string[] SourceHosts { get; set; } = [];
+
+    /// <summary>Wall-clock cap on one /fetch download, headers to last byte.</summary>
+    public int FetchTimeoutSeconds { get; set; } = 120;
 }

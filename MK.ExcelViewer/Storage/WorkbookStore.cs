@@ -58,8 +58,12 @@ public sealed class WorkbookStore(IOptions<ExcelViewerOptions> options, ILogger<
 
         // Write to a temp name and rename. Rename is atomic on both NTFS and ext4, so a concurrent
         // reader can never observe a half-written file behind a hash that already "exists".
-        var dataTmp = DataPath(meta.Hash) + ".tmp";
-        var metaTmp = MetaPath(meta.Hash) + ".tmp";
+        // The temp name is unique per write: two ingests of the same file at once (a double-click)
+        // target the same hash, and a shared ".tmp" made the second fail on the first's open handle.
+        // Both write identical bytes, so whichever rename lands last is correct.
+        var tmp = $".{Guid.NewGuid():N}.tmp";
+        var dataTmp = DataPath(meta.Hash) + tmp;
+        var metaTmp = MetaPath(meta.Hash) + tmp;
 
         await File.WriteAllBytesAsync(dataTmp, bytes, ct);
         await File.WriteAllTextAsync(metaTmp, JsonSerializer.Serialize(meta, Json), ct);
